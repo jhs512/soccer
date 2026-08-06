@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blob Soccer — 2D 1:1 축구</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0d11; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+    color: #e7ecf3;
+  }
+  canvas { display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+
+/* ============================================================
+   Blob Soccer — 오프라인 2D 1:1 축구 프로토타입
+   - 조작: 이동(4방향) + 대시(1키). 끝.
+   - 의존성 없음. index.html 하나로 실행.
+   ============================================================ */
+
+const TAU = Math.PI * 2;
+
+const CFG = {
+  W: 1280, H: 800,              // 논리 필드 크기 (화면에 맞춰 스케일)
+  goalH: 250, goalDepth: 44,    // 골문 높이 / 깊이
+  playerR: 28, ballR: 15,
+  accel: 2600,                  // 가속도 px/s^2
+  maxSpeed: 420,
+  drag: 5.2,                    // 선수 감속
+  ballDrag: 0.85,               // 공 감속
+  ballMax: 1800,
+  dashImpulse: 700,             // 대시 순간 가속
+  dashTime: 0.18,               // 대시 지속(과속 허용 시간)
+  dashCooldown: 1.5,
+  wallBounce: 0.74,
+  postR: 9,
+  matchTime: 150,               // 경기 시간(초)
+  kickoffFreeze: 0.9,           // 킥오프 정지 시간
+  goalFreeze: 1.6,              // 득점 연출 시간
+  playerMass: 5, ballMass: 1,
+};
+
+const COLORS = {
+  bg: "#0b0d11",
+  grid: "rgba(255,255,255,0.045)",
+  line: "rgba(255,255,255,0.10)",
+  ball: "#f4f7fb", ballEdge: "#b9c2cf",
+  p1: "#49b7f5", p1d: "#2478a8",
+  p2: "#ff6f6f", p2d: "#b53f3f",
+};
+
+/* ---------- 캔버스 / 스케일 ---------- */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let view = { scale: 1, ox: 0, oy: 0 };
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cw = window.innerWidth, ch = window.innerHeight;
+  canvas.width = Math.floor(cw * dpr);
+  canvas.height = Math.floor(ch * dpr);
+  canvas.style.width = cw + "px";
+  canvas.style.height = ch + "px";
+  const pad = 24;
+  const scale = Math.min((cw - pad) / CFG.W, (ch - pad) / CFG.H);
+  view.scale = scale * dpr;
+  view.ox = (canvas.width - CFG.W * view.scale) / 2;
+  view.oy = (canvas.height - CFG.H * view.scale) / 2;
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ---------- 입력 ---------- */
+const keys = new Set();
+const KEYMAP = {
+  p1: { up: ["KeyW"], down: ["KeyS"], left: ["KeyA"], right: ["KeyD"],
+        dash: ["Space", "ShiftLeft", "KeyF"] },
+  p2: { up: ["ArrowUp"], down: ["ArrowDown"], left: ["ArrowLeft"], right: ["ArrowRight"],
+        dash: ["Enter", "ShiftRight", "Slash", "Numpad0"] },
+};
+const BLOCKED = new Set(["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Slash", "Enter"]);
+
+window.addEventListener("keydown", (e) => {
+  if (BLOCKED.has(e.code)) e.preventDefault();
+  if (e.repeat) return;
+  keys.add(e.code);
+  handleMenuKey(e.code);
+});
+window.addEventListener("keyup", (e) => keys.delete(e.code));
+window.addEventListener("blur", () => keys.clear());
+
+const held = (codes) => codes.some((c) => keys.has(c));
+
+/* ---------- 사운드 (에셋 없이 WebAudio) ---------- */
+let ac = null;
+function beep(freq, dur, type = "sine", gain = 0.05) {
+  try {
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(gain, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + dur);
+  } catch (_) { /* 사운드는 있으면 좋은 정도 */ }
+}
+const sfxKick = () => beep(320 + Math.random() * 60, 0.08, "square", 0.045);
+const sfxWall = () => beep(180, 0.05, "sine", 0.03);
+const sfxDash = () => beep(700, 0.1, "sawtooth", 0.025);
+const sfxGoal = () => { beep(520, 0.16, "square", 0.06); setTimeout(() => beep(780, 0.3, "square", 0.06), 150); };
+
+/* ---------- 게임 상태 ---------- */
+const goalTop = () => (CFG.H - CFG.goalH) / 2;
+const goalBot = () => (CFG.H + CFG.goalH) / 2;
+
+const G = {
+  screen: "menu",        // menu | play | goal | over
+  mode: "ai",            // ai | duo
+  timer: CFG.matchTime,
+  freeze: 0,
+  lastScorer: null,
+  banner: "",
+  players: [],
+  ball: null,
+  trail: [],
+  shake: 0,
+};
+
+function makePlayer(idx, isBot) {
+  const left = idx === 0;
+  return {
+    idx, isBot, left,
+    name: isBot ? "BOT" : (G.mode === "duo" ? (left ? "P1" : "P2") : "YOU"),
+    color: left ? COLORS.p1 : COLORS.p2,
+    dark: left ? COLORS.p1d : COLORS.p2d,
+    x: 0, y: 0, vx: 0, vy: 0, r: CFG.playerR,
+    dashCd: 0, dashT: 0, face: left ? 1 : -1,
+    score: 0, kickFlash: 0,
+    aiTick: 0, aiJitter: { x: 0, y: 0 },
+  };
+}
+
+function resetPositions(kickoffFor) {
+  const p1 = G.players[0], p2 = G.players[1];
+  p1.x = CFG.W * 0.25; p1.y = CFG.H / 2;
+  p2.x = CFG.W * 0.75; p2.y = CFG.H / 2;
+  for (const p of G.players) { p.vx = p.vy = 0; p.dashT = 0; }
+  G.ball = { x: CFG.W / 2, y: CFG.H / 2, vx: 0, vy: 0, r: CFG.ballR };
+  // 실점한 쪽에 약간의 어드밴티지: 공을 그쪽으로 살짝 밀어줌
+  if (kickoffFor === 0) G.ball.x -= 40;
+  else if (kickoffFor === 1) G.ball.x += 40;
+  G.trail.length = 0;
+  G.freeze = CFG.kickoffFreeze;
+}
+
+function startMatch(mode) {
+  G.mode = mode;
+  G.players = [makePlayer(0, false), makePlayer(1, mode === "ai")];
+  G.timer = CFG.matchTime;
+  G.banner = "";
+  G.screen = "play";
+  resetPositions(null);
+}
+
+function handleMenuKey(code) {
+  if (G.screen === "menu") {
+    if (code === "Digit1" || code === "Numpad1") startMatch("ai");
+    if (code === "Digit2" || code === "Numpad2") startMatch("duo");
+    if (code === "Space" || code === "Enter") startMatch("ai");
+  } else if (G.screen === "over") {
+    if (code === "KeyR" || code === "Space" || code === "Enter") startMatch(G.mode);
+    if (code === "Escape") G.screen = "menu";
+  } else if (G.screen === "play" || G.screen === "goal") {
+    if (code === "Escape") G.screen = "menu";
+  }
+}
+
+/* ---------- 조작 입력 → 방향 벡터 ---------- */
+function humanInput(slot) {
+  const m = KEYMAP[slot];
+  let x = (held(m.right) ? 1 : 0) - (held(m.left) ? 1 : 0);
+  let y = (held(m.down) ? 1 : 0) - (held(m.up) ? 1 : 0);
+  const len = Math.hypot(x, y);
+  if (len > 0) { x /= len; y /= len; }
+  return { x, y, dash: held(m.dash) };
+}
+
+/* ---------- AI ---------- */
+function botInput(p, dt) {
+  const b = G.ball;
+  const myGoal = { x: p.left ? 0 : CFG.W, y: CFG.H / 2 };
+  const foeGoal = { x: p.left ? CFG.W : 0, y: CFG.H / 2 };
+
+  // 0.12초마다 목표를 갱신 + 미세한 흔들림 → 사람 같은 반응
+  p.aiTick -= dt;
+  if (p.aiTick <= 0) {
+    p.aiTick = 0.12;
+    p.aiJitter = { x: (Math.random() - 0.5) * 46, y: (Math.random() - 0.5) * 46 };
+  }
+
+  // 공의 미래 위치를 살짝 예측
+  const lead = 0.16;
+  const bx = b.x + b.vx * lead, by = b.y + b.vy * lead;
+
+  // 상대 골 방향에서 공 뒤쪽으로 붙는 지점
+  let ang = Math.atan2(foeGoal.y - by, foeGoal.x - bx);
+  const behind = p.r + b.r * 0.9;
+  let tx = bx - Math.cos(ang) * behind;
+  let ty = by - Math.sin(ang) * behind;
+
+  // 공이 우리 진영으로 굴러오는 중이면 골문 라인 위에서 차단
+  const towardMyGoal = p.left ? b.vx < -40 : b.vx > 40;
+  const inMyHalf = p.left ? b.x < CFG.W * 0.45 : b.x > CFG.W * 0.55;
+  if (towardMyGoal && inMyHalf) {
+    const t = 0.35;
+    const ix = b.x + b.vx * t, iy = b.y + b.vy * t;
+    const mix = p.left ? Math.max(ix, myGoal.x + 90) : Math.min(ix, myGoal.x - 90);
+    tx = mix; ty = iy;
+  }
+
+  // 자책골 방지: 접근 지점이 자기 골라인 뒤쪽이면 옆에서 밀어 걷어내기
+  const behindOwnLine = p.left ? tx < 90 : tx > CFG.W - 90;
+  if (behindOwnLine) {
+    const up = by < CFG.H / 2;
+    tx = bx;
+    ty = by + (up ? 1 : -1) * (p.r + b.r);   // 공 아래/위에서 위/아래로 밀어냄
+  }
+
+  tx += p.aiJitter.x; ty += p.aiJitter.y;
+  tx = Math.max(p.r, Math.min(CFG.W - p.r, tx));
+  ty = Math.max(p.r, Math.min(CFG.H - p.r, ty));
+
+  let dx = tx - p.x, dy = ty - p.y;
+  const d = Math.hypot(dx, dy) || 1;
+  if (d < 6) { dx = dy = 0; } else { dx /= d; dy /= d; }
+
+  // 공에 붙었고 슛 각이 열렸으면 대시
+  const distBall = Math.hypot(b.x - p.x, b.y - p.y);
+  const aimed = Math.sign(foeGoal.x - p.x) === Math.sign(b.x - p.x);
+  const dash = distBall < p.r + b.r + 34 && aimed && !behindOwnLine && Math.random() < 0.35;
+
+  return { x: dx, y: dy, dash };
+}
+
+/* ---------- 물리 ---------- */
+function updatePlayer(p, input, dt) {
+  if (input.x || input.y) {
+    p.vx += input.x * CFG.accel * dt;
+    p.vy += input.y * CFG.accel * dt;
+    p.face = input.x !== 0 ? Math.sign(input.x) : p.face;
+  }
+
+  if (p.dashCd > 0) p.dashCd -= dt;
+  if (p.dashT > 0) p.dashT -= dt;
+
+  if (input.dash && p.dashCd <= 0) {
+    let dx = input.x, dy = input.y;
+    if (!dx && !dy) {
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp > 20) { dx = p.vx / sp; dy = p.vy / sp; } else { dx = p.face; dy = 0; }
+    }
+    p.vx += dx * CFG.dashImpulse;
+    p.vy += dy * CFG.dashImpulse;
+    p.dashCd = CFG.dashCooldown;
+    p.dashT = CFG.dashTime;
+    sfxDash();
+  }
+
+  // 감속
+  const k = 1 / (1 + CFG.drag * dt);
+  p.vx *= k; p.vy *= k;
+
+  // 속도 제한 (대시 중에는 초과 허용)
+  const cap = p.dashT > 0 ? CFG.maxSpeed * 2.4 : CFG.maxSpeed;
+  const sp = Math.hypot(p.vx, p.vy);
+  if (sp > cap) { p.vx = (p.vx / sp) * cap; p.vy = (p.vy / sp) * cap; }
+
+  p.x += p.vx * dt; p.y += p.vy * dt;
+
+  // 벽 (선수는 골문 안으로 못 들어감)
+  if (p.x < p.r) { p.x = p.r; p.vx = Math.abs(p.vx) * 0.3; }
+  if (p.x > CFG.W - p.r) { p.x = CFG.W - p.r; p.vx = -Math.abs(p.vx) * 0.3; }
+  if (p.y < p.r) { p.y = p.r; p.vy = Math.abs(p.vy) * 0.3; }
+  if (p.y > CFG.H - p.r) { p.y = CFG.H - p.r; p.vy = -Math.abs(p.vy) * 0.3; }
+
+  if (p.kickFlash > 0) p.kickFlash -= dt;
+}
+
+function updateBall(dt) {
+  const b = G.ball;
+  const k = 1 / (1 + CFG.ballDrag * dt);
+  b.vx *= k; b.vy *= k;
+
+  const sp = Math.hypot(b.vx, b.vy);
+  if (sp > CFG.ballMax) { b.vx = (b.vx / sp) * CFG.ballMax; b.vy = (b.vy / sp) * CFG.ballMax; }
+
+  b.x += b.vx * dt; b.y += b.vy * dt;
+
+  // 위/아래 벽
+  if (b.y < b.r) { b.y = b.r; b.vy = -b.vy * CFG.wallBounce; sfxWall(); }
+  if (b.y > CFG.H - b.r) { b.y = CFG.H - b.r; b.vy = -b.vy * CFG.wallBounce; sfxWall(); }
+
+  const gt = goalTop(), gb = goalBot();
+  const inMouth = b.y > gt && b.y < gb;
+
+  // 좌우 벽 (골문 밖이면 반사)
+  if (!inMouth) {
+    if (b.x < b.r) { b.x = b.r; b.vx = -b.vx * CFG.wallBounce; sfxWall(); }
+    if (b.x > CFG.W - b.r) { b.x = CFG.W - b.r; b.vx = -b.vx * CFG.wallBounce; sfxWall(); }
+  } else {
+    // 골 판정
+    if (b.x < -b.r * 0.5) return scoreGoal(1);
+    if (b.x > CFG.W + b.r * 0.5) return scoreGoal(0);
+  }
+
+  // 골포스트 (원형 충돌)
+  for (const px of [0, CFG.W]) {
+    for (const py of [gt, gb]) {
+      const dx = b.x - px, dy = b.y - py;
+      const d = Math.hypot(dx, dy);
+      const min = b.r + CFG.postR;
+      if (d < min && d > 0.0001) {
+        const nx = dx / d, ny = dy / d;
+        b.x = px + nx * min; b.y = py + ny * min;
+        const vn = b.vx * nx + b.vy * ny;
+        b.vx -= (1 + CFG.wallBounce) * vn * nx;
+        b.vy -= (1 + CFG.wallBounce) * vn * ny;
+        sfxWall();
+      }
+    }
+  }
+
+  G.trail.push({ x: b.x, y: b.y });
+  if (G.trail.length > 12) G.trail.shift();
+}
+
+function collidePlayerBall(p) {
+  const b = G.ball;
+  const dx = b.x - p.x, dy = b.y - p.y;
+  const d = Math.hypot(dx, dy);
+  const min = p.r + b.r;
+  if (d >= min || d < 0.0001) return;
+
+  const nx = dx / d, ny = dy / d;
+  const overlap = min - d;
+  b.x += nx * overlap; b.y += ny * overlap;
+
+  const rvx = b.vx - p.vx, rvy = b.vy - p.vy;
+  const vn = rvx * nx + rvy * ny;
+
+  // 대시 중이면 강한 킥
+  const boost = p.dashT > 0 ? 1.9 : 1.0;
+  const e = 0.55;
+  const invSum = 1 / CFG.ballMass + 1 / CFG.playerMass;
+  let j = -(1 + e) * Math.min(vn, 0) / invSum;
+
+  const push = (170 + Math.hypot(p.vx, p.vy) * 0.85) * boost;
+
+  b.vx += (nx * (j / CFG.ballMass)) + nx * push;
+  b.vy += (ny * (j / CFG.ballMass)) + ny * push;
+  p.vx -= nx * (j / CFG.playerMass) * 0.5;
+  p.vy -= ny * (j / CFG.playerMass) * 0.5;
+
+  p.kickFlash = 0.14;
+  G.shake = Math.min(10, G.shake + (p.dashT > 0 ? 6 : 1.5));
+  sfxKick();
+}
+
+function collidePlayers(a, c) {
+  const dx = c.x - a.x, dy = c.y - a.y;
+  const d = Math.hypot(dx, dy);
+  const min = a.r + c.r;
+  if (d >= min || d < 0.0001) return;
+  const nx = dx / d, ny = dy / d;
+  const overlap = (min - d) / 2;
+  a.x -= nx * overlap; a.y -= ny * overlap;
+  c.x += nx * overlap; c.y += ny * overlap;
+
+  const rvx = c.vx - a.vx, rvy = c.vy - a.vy;
+  const vn = rvx * nx + rvy * ny;
+  if (vn > 0) return;
+  const j = -(1 + 0.42) * vn / 2;
+  a.vx -= nx * j; a.vy -= ny * j;
+  c.vx += nx * j; c.vy += ny * j;
+}
+
+function scoreGoal(scorerIdx) {
+  G.players[scorerIdx].score++;
+  G.lastScorer = scorerIdx;
+  G.screen = "goal";
+  G.freeze = CFG.goalFreeze;
+  G.shake = 14;
+  G.banner = "GOAL!";
+  sfxGoal();
+}
+
+function endMatch() {
+  const [a, b] = G.players;
+  G.screen = "over";
+  if (a.score === b.score) G.banner = "무승부";
+  else G.banner = (a.score > b.score ? a.name : b.name) + " 승리!";
+  beep(440, 0.5, "triangle", 0.05);
+}
+
+/* ---------- 업데이트 루프 ---------- */
+function update(dt) {
+  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 30);
+  if (G.screen !== "play" && G.screen !== "goal") return;
+
+  if (G.freeze > 0) {
+    G.freeze -= dt;
+    if (G.freeze <= 0 && G.screen === "goal") {
+      const forSide = G.lastScorer === 0 ? 1 : 0;
+      G.screen = "play";
+      G.banner = "";
+      resetPositions(forSide);
+    }
+    if (G.screen === "goal") return;   // 득점 연출 중엔 정지
+  }
+
+  if (G.screen !== "play") return;
+
+  G.timer -= dt;
+  if (G.timer <= 0) { G.timer = 0; endMatch(); return; }
+
+  if (G.freeze > 0) return;            // 킥오프 카운트다운 중
+
+  const inputs = [
+    humanInput("p1"),
+    G.players[1].isBot ? botInput(G.players[1], dt) : humanInput("p2"),
+  ];
+
+  for (let i = 0; i < 2; i++) updatePlayer(G.players[i], inputs[i], dt);
+  collidePlayers(G.players[0], G.players[1]);
+  updateBall(dt);
+  if (G.screen !== "play") return;     // 골 들어갔으면 중단
+  for (const p of G.players) collidePlayerBall(p);
+}
+
+/* ---------- 렌더 ---------- */
+function drawField() {
+  const gt = goalTop(), gb = goalBot();
+
+  // 배경
+  ctx.fillStyle = "#12161d";
+  ctx.fillRect(0, 0, CFG.W, CFG.H);
+
+  // agar.io 스타일 격자
+  ctx.strokeStyle = COLORS.grid;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let x = 0; x <= CFG.W; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, CFG.H); }
+  for (let y = 0; y <= CFG.H; y += 40) { ctx.moveTo(0, y); ctx.lineTo(CFG.W, y); }
+  ctx.stroke();
+
+  // 라인
+  ctx.strokeStyle = COLORS.line;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(2, 2, CFG.W - 4, CFG.H - 4);
+  ctx.beginPath();
+  ctx.moveTo(CFG.W / 2, 0); ctx.lineTo(CFG.W / 2, CFG.H);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(CFG.W / 2, CFG.H / 2, 110, 0, TAU); ctx.stroke();
+  ctx.beginPath(); ctx.arc(CFG.W / 2, CFG.H / 2, 5, 0, TAU);
+  ctx.fillStyle = COLORS.line; ctx.fill();
+
+  // 페널티 박스
+  const bw = 150;
+  ctx.strokeRect(2, gt - 60, bw, CFG.goalH + 120);
+  ctx.strokeRect(CFG.W - 2 - bw, gt - 60, bw, CFG.goalH + 120);
+
+  // 골문
+  for (const side of [0, 1]) {
+    const x = side === 0 ? 0 : CFG.W;
+    const dir = side === 0 ? -1 : 1;
+    const col = side === 0 ? COLORS.p1 : COLORS.p2;
+
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    ctx.fillStyle = col;
+    ctx.fillRect(Math.min(x, x + dir * CFG.goalDepth), gt, CFG.goalDepth, CFG.goalH);
+    ctx.restore();
+
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(x, gt);
+    ctx.lineTo(x + dir * CFG.goalDepth, gt);
+    ctx.lineTo(x + dir * CFG.goalDepth, gb);
+    ctx.lineTo(x, gb);
+    ctx.stroke();
+
+    // 포스트
+    ctx.fillStyle = col;
+    for (const py of [gt, gb]) {
+      ctx.beginPath(); ctx.arc(x, py, CFG.postR, 0, TAU); ctx.fill();
+    }
+  }
+}
+
+function drawBlob(p) {
+  const pulse = p.kickFlash > 0 ? 1 + p.kickFlash * 0.6 : 1;
+  const r = p.r * pulse;
+
+  // 대시 중 잔상
+  if (p.dashT > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x - p.vx * 0.035, p.y - p.vy * 0.035, r * 1.05, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU);
+  ctx.fillStyle = p.color; ctx.fill();
+  ctx.lineWidth = r * 0.2; ctx.strokeStyle = p.dark; ctx.stroke();
+
+  // 대시 쿨다운 링
+  const ready = 1 - Math.max(0, p.dashCd) / CFG.dashCooldown;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r + 9, -Math.PI / 2, -Math.PI / 2 + TAU * ready);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = ready >= 1 ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.3)";
+  ctx.stroke();
+
+  // 이름
+  ctx.font = "bold 16px system-ui, sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,0.45)";
+  ctx.strokeText(p.name, p.x, p.y);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(p.name, p.x, p.y);
+}
+
+function drawBall() {
+  const b = G.ball;
+
+  // 궤적
+  for (let i = 0; i < G.trail.length; i++) {
+    const t = G.trail[i];
+    ctx.globalAlpha = (i / G.trail.length) * 0.22;
+    ctx.beginPath(); ctx.arc(t.x, t.y, b.r * (0.4 + i / G.trail.length * 0.6), 0, TAU);
+    ctx.fillStyle = COLORS.ball; ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU);
+  ctx.fillStyle = COLORS.ball; ctx.fill();
+  ctx.lineWidth = b.r * 0.28; ctx.strokeStyle = COLORS.ballEdge; ctx.stroke();
+}
+
+function drawHUD() {
+  const [a, b] = G.players;
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+
+  // 스코어
+  ctx.font = "bold 54px system-ui, sans-serif";
+  ctx.fillStyle = a.color; ctx.textAlign = "right";
+  ctx.fillText(String(a.score), CFG.W / 2 - 34, 18);
+  ctx.fillStyle = b.color; ctx.textAlign = "left";
+  ctx.fillText(String(b.score), CFG.W / 2 + 34, 18);
+  ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.textAlign = "center";
+  ctx.fillText(":", CFG.W / 2, 18);
+
+  // 타이머
+  const t = Math.max(0, Math.ceil(G.timer));
+  const mm = String(Math.floor(t / 60)).padStart(2, "0");
+  const ss = String(t % 60).padStart(2, "0");
+  ctx.font = "bold 22px system-ui, sans-serif";
+  ctx.fillStyle = t <= 10 ? "#ffd166" : "rgba(255,255,255,0.6)";
+  ctx.fillText(mm + ":" + ss, CFG.W / 2, 80);
+
+  // 킥오프 카운트다운
+  if (G.screen === "play" && G.freeze > 0) {
+    ctx.font = "bold 64px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.textBaseline = "middle";
+    ctx.fillText("READY", CFG.W / 2, CFG.H / 2 - 170);
+  }
+
+  // 조작 안내
+  ctx.font = "14px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.28)";
+  ctx.textBaseline = "bottom";
+  const hint = G.mode === "duo"
+    ? "P1: WASD + Space   |   P2: 방향키 + Enter   |   ESC: 메뉴"
+    : "이동: WASD / 방향키   |   대시: Space   |   ESC: 메뉴";
+  ctx.fillText(hint, CFG.W / 2, CFG.H - 12);
+}
+
+function drawBanner(text, sub) {
+  ctx.save();
+  ctx.fillStyle = "rgba(6,8,12,0.62)";
+  ctx.fillRect(0, 0, CFG.W, CFG.H);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "bold 96px system-ui, sans-serif";
+  ctx.fillStyle = "#fff";
+  ctx.fillText(text, CFG.W / 2, CFG.H / 2 - 30);
+  if (sub) {
+    ctx.font = "22px system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    ctx.fillText(sub, CFG.W / 2, CFG.H / 2 + 50);
+  }
+  ctx.restore();
+}
+
+function drawMenu() {
+  ctx.save();
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+
+  const cx = CFG.W / 2, cy = CFG.H / 2;
+
+  // 데코 블롭
+  const t = performance.now() / 1000;
+  const deco = [
+    { x: cx - 300, y: cy - 40 + Math.sin(t) * 14, r: 46, c: COLORS.p1, d: COLORS.p1d },
+    { x: cx + 300, y: cy - 40 + Math.cos(t * 1.2) * 14, r: 46, c: COLORS.p2, d: COLORS.p2d },
+  ];
+  for (const b of deco) {
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU);
+    ctx.fillStyle = b.c; ctx.fill();
+    ctx.lineWidth = b.r * 0.2; ctx.strokeStyle = b.d; ctx.stroke();
+  }
+  ctx.beginPath(); ctx.arc(cx, cy - 40 + Math.sin(t * 1.6) * 10, 16, 0, TAU);
+  ctx.fillStyle = COLORS.ball; ctx.fill();
+  ctx.lineWidth = 5; ctx.strokeStyle = COLORS.ballEdge; ctx.stroke();
+
+  ctx.font = "bold 72px system-ui, sans-serif";
+  ctx.fillStyle = "#fff";
+  ctx.fillText("BLOB SOCCER", cx, cy - 180);
+
+  ctx.font = "20px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.fillText("2D 1:1 축구 · 이동 + 대시 두 가지 조작이 전부", cx, cy - 120);
+
+  ctx.font = "bold 30px system-ui, sans-serif";
+  ctx.fillStyle = "#ffd166";
+  ctx.fillText("[1]  AI 대전", cx, cy + 90);
+  ctx.fillText("[2]  같은 PC 2인 대전", cx, cy + 140);
+
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.45)";
+  ctx.fillText("P1: WASD + Space        P2: 방향키 + Enter", cx, cy + 210);
+  ctx.fillText("대시로 공을 강하게 차고 상대를 밀어낼 수 있습니다 (쿨타임 1.5초)", cx, cy + 245);
+  ctx.restore();
+}
+
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = COLORS.bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const sx = (Math.random() - 0.5) * G.shake;
+  const sy = (Math.random() - 0.5) * G.shake;
+  ctx.setTransform(view.scale, 0, 0, view.scale, view.ox + sx * view.scale, view.oy + sy * view.scale);
+
+  drawField();
+
+  if (G.screen === "menu") { drawMenu(); return; }
+
+  drawBall();
+  for (const p of G.players) drawBlob(p);
+  drawHUD();
+
+  if (G.screen === "goal") {
+    const scorer = G.players[G.lastScorer];
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    drawBanner("GOAL!", scorer.name + " 득점");
+    ctx.restore();
+  }
+  if (G.screen === "over") drawBanner(G.banner, "R: 다시하기   ESC: 메뉴");
+}
+
+/* ---------- 메인 루프 (고정 타임스텝) ---------- */
+const STEP = 1 / 120;
+let acc = 0, last = performance.now();
+
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;          // 탭 전환 등으로 튀는 것 방지
+  acc += dt;
+  while (acc >= STEP) { update(STEP); acc -= STEP; }
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
