@@ -74,6 +74,28 @@ export function createGameServer(validTokens = new Set(), options = {}) {
     /** 로비 방: 코드 → 호스트·게스트 소켓. 게스트가 들어오면 두 명이 고정된다. */
     const rooms = new Map();
     const socketRoomCodes = new Map();
+    /** 같은 네트워크 판별용 공인 IP와, socket ID를 노출하지 않기 위한 공개 피어 ID. */
+    const socketPublicIps = new Map();
+    const socketPeerIds = new Map();
+    const peerIdSockets = new Map();
+    /** 참가자를 기다리는 공개 방 목록(코드·호스트 닉네임만 노출). */
+    const roomListPayload = () => [...rooms.entries()]
+        .filter(([, room]) => !room.guestId)
+        .map(([code, room]) => ({ code, host: socketNames.get(room.hostId) ?? "Guest" }));
+    const broadcastRoomList = () => io.emit("room-list", roomListPayload());
+    /** 같은 공인 IP(= 같은 네트워크로 추정)의 다른 접속자 목록을 각자에게 보낸다. */
+    const broadcastLanPeers = (ip) => {
+        if (!ip)
+            return;
+        const members = [...socketPublicIps.entries()].filter(([, memberIp]) => memberIp === ip);
+        for (const [socketId] of members) {
+            const peers = members
+                .filter(([otherId]) => otherId !== socketId)
+                .map(([otherId]) => ({ peerId: socketPeerIds.get(otherId) ?? "", nickname: socketNames.get(otherId) ?? "Guest" }))
+                .filter((peer) => peer.peerId);
+            io.sockets.sockets.get(socketId)?.emit("lan-peers", peers);
+        }
+    };
     const leaveRoom = (socketId) => {
         const code = socketRoomCodes.get(socketId);
         if (!code)
@@ -93,6 +115,7 @@ export function createGameServer(validTokens = new Set(), options = {}) {
             room.guestId = null;
             io.sockets.sockets.get(room.hostId)?.emit("room-peer-left", {});
         }
+        broadcastRoomList();
     };
     const snapshot = () => ({
         updatedAt: new Date().toISOString(),
@@ -301,6 +324,15 @@ export function createGameServer(validTokens = new Set(), options = {}) {
         const token = String(socket.handshake.auth.token);
         socketNames.set(socket.id, profileNames.get(token) ?? `Guest-${String(++guestSequence).padStart(3, "0")}`);
         socketActivityAt.set(socket.id, Date.now());
+        // CloudFront/프록시 뒤에서는 X-Forwarded-For의 첫 항목이 실제 공인 IP다.
+        const forwarded = String(socket.handshake.headers["x-forwarded-for"] ?? "").split(",")[0].trim();
+        const publicIp = forwarded || socket.handshake.address;
+        socketPublicIps.set(socket.id, publicIp);
+        const peerId = randomBytes(6).toString("base64url");
+        socketPeerIds.set(socket.id, peerId);
+        peerIdSockets.set(peerId, socket.id);
+        socket.emit("room-list", roomListPayload());
+        broadcastLanPeers(publicIp);
         stats.activeConnections += 1;
         stats.totalConnections += 1;
         broadcastSnapshot();
@@ -377,14 +409,19 @@ export function createGameServer(validTokens = new Set(), options = {}) {
             socketRoomCodes.set(socket.id, code);
             socketActivityAt.set(socket.id, Date.now());
             socket.emit("room-created", { code });
+            broadcastRoomList();
         });
         socket.on("join-room", (rawCode) => {
             if (typeof rawCode !== "string" || socketSessionIds.has(socket.id))
                 return;
             const code = rawCode.trim().toUpperCase();
             const room = rooms.get(code);
-            if (!room || room.hostId === socket.id)
+            if (room?.hostId === socket.id)
                 return;
+            if (!room) {
+                socket.emit("room-error", { reason: "not-found" });
+                return;
+            }
             if (room.guestId && room.guestId !== socket.id) {
                 socket.emit("room-error", { reason: "full" });
                 return;
@@ -398,6 +435,22 @@ export function createGameServer(validTokens = new Set(), options = {}) {
             };
             io.sockets.sockets.get(room.hostId)?.emit("room-ready", { ...payload, playerIndex: 0 });
             socket.emit("room-ready", { ...payload, playerIndex: 1 });
+            broadcastRoomList();
+        });
+        // 같은 네트워크 사용자를 방으로 초대한다(호스트 전용, 대상은 수락해야 참가).
+        socket.on("invite-lan", (rawPeerId) => {
+            if (typeof rawPeerId !== "string")
+                return;
+            const code = socketRoomCodes.get(socket.id);
+            const room = code ? rooms.get(code) : undefined;
+            if (!room || room.hostId !== socket.id || room.guestId)
+                return;
+            const targetSocketId = peerIdSockets.get(rawPeerId);
+            if (!targetSocketId || targetSocketId === socket.id)
+                return;
+            if (socketPublicIps.get(targetSocketId) !== socketPublicIps.get(socket.id))
+                return;
+            io.sockets.sockets.get(targetSocketId)?.emit("room-invite", { code, host: socketNames.get(socket.id) ?? "Guest" });
         });
         socket.on("leave-room", () => leaveRoom(socket.id));
         // 같은 네트워크 P2P를 위한 WebRTC 시그널 중계. 서버는 내용을 보지 않고 상대에게만 전달한다.
@@ -475,6 +528,13 @@ export function createGameServer(validTokens = new Set(), options = {}) {
             leaveRoom(socket.id);
             socketActivityAt.delete(socket.id);
             socketEmoteAt.delete(socket.id);
+            const departedIp = socketPublicIps.get(socket.id);
+            socketPublicIps.delete(socket.id);
+            const departedPeerId = socketPeerIds.get(socket.id);
+            socketPeerIds.delete(socket.id);
+            if (departedPeerId)
+                peerIdSockets.delete(departedPeerId);
+            broadcastLanPeers(departedIp);
             const queueIndex = queuedSockets.indexOf(socket.id);
             if (queueIndex >= 0)
                 queuedSockets.splice(queueIndex, 1);
