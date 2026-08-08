@@ -40,6 +40,8 @@ const BALL_MASS = 1;
 const KICK_PUSH = 85;
 const KICK_DASH_BOOST = 1.7;
 const KICKOFF_BALL_OFFSET = 40;
+/** 모서리 45° 면의 크기. 각 벽을 따라 이만큼 안쪽에서 대각선으로 깎는다. */
+const CORNER_BEVEL = 60;
 export const createSimInput = () => ({ moveX: 0, moveY: 0, dash: false });
 export const createSimPlayer = (left) => ({
     x: left ? FIELD_WIDTH * 0.25 : FIELD_WIDTH * 0.75,
@@ -250,6 +252,25 @@ export function advanceSimBall(ball, dt) {
     for (const postX of [0, FIELD_WIDTH]) {
         collidePost(ball, postX, GOAL_TOP);
         collidePost(ball, postX, GOAL_BOTTOM);
+    }
+    // 구석 포켓 방지: 네 모서리를 45° 면으로 깎는다. 90° 포켓은 공을 가두지만
+    // 45° 면의 법선은 경기장 안쪽을 향해 공이 항상 필드로 되튀어 나온다.
+    for (const [cornerX, cornerY] of [[0, 0], [FIELD_WIDTH, 0], [0, FIELD_HEIGHT], [FIELD_WIDTH, FIELD_HEIGHT]]) {
+        const signX = cornerX === 0 ? 1 : -1;
+        const signY = cornerY === 0 ? 1 : -1;
+        const along = (ball.x - cornerX) * signX + (ball.y - cornerY) * signY;
+        const penetration = BALL_RADIUS - (along - CORNER_BEVEL) * Math.SQRT1_2;
+        if (penetration <= 0)
+            continue;
+        const nx = signX * Math.SQRT1_2;
+        const ny = signY * Math.SQRT1_2;
+        ball.x += nx * penetration;
+        ball.y += ny * penetration;
+        const normalVelocity = ball.vx * nx + ball.vy * ny;
+        if (normalVelocity < 0) {
+            ball.vx -= (1 + WALL_BOUNCE) * normalVelocity * nx;
+            ball.vy -= (1 + WALL_BOUNCE) * normalVelocity * ny;
+        }
     }
     return null;
 }
