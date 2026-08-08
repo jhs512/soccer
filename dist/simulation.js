@@ -57,6 +57,7 @@ export const createSimState = () => ({
     kickoffRemaining: 0,
     lastScorer: null,
     goalCount: 0,
+    simTime: 0,
 });
 export function cloneSimState(state) {
     return {
@@ -68,6 +69,7 @@ export function cloneSimState(state) {
         kickoffRemaining: state.kickoffRemaining ?? 0,
         lastScorer: state.lastScorer ?? null,
         goalCount: state.goalCount ?? 0,
+        simTime: state.simTime ?? 0,
     };
 }
 /**
@@ -159,7 +161,11 @@ function collidePlayers(first, second) {
     second.vx += nx * impulse;
     second.vy += ny * impulse;
 }
-function collidePlayerWithBall(ball, player) {
+/**
+ * 선수-공 충돌을 처리하고 접촉했으면 true를 돌려준다.
+ * 클라이언트도 이 함수로 내 킥을 즉시 예측한다(선발동 후보강).
+ */
+export function collideSimPlayerWithBall(ball, player) {
     const dx = ball.x - player.x;
     const dy = ball.y - player.y;
     const distance = Math.hypot(dx, dy);
@@ -195,8 +201,11 @@ function collidePost(ball, x, y) {
     ball.vx -= (1 + WALL_BOUNCE) * normalVelocity * nx;
     ball.vy -= (1 + WALL_BOUNCE) * normalVelocity * ny;
 }
-/** 공을 진행시키고, 골라인을 완전히 넘었으면 득점한 플레이어 번호를 돌려준다. */
-function updateBall(ball, dt) {
+/**
+ * 공을 진행시키고, 골라인을 완전히 넘었으면 득점한 플레이어 번호를 돌려준다.
+ * 클라이언트는 표시 전용 공 예측에 재사용한다(득점 반환값은 무시).
+ */
+export function advanceSimBall(ball, dt) {
     const drag = 1 / (1 + BALL_DRAG * dt);
     ball.vx *= drag;
     ball.vy *= drag;
@@ -255,6 +264,7 @@ function startKickoff(state, scorer) {
     state.kickoffRemaining = KICKOFF_FREEZE_SECONDS;
 }
 function stepFixed(state, inputs, dt, report) {
+    state.simTime += dt;
     state.remainingSeconds = Math.max(0, state.remainingSeconds - dt);
     if (state.remainingSeconds === 0) {
         state.status = "finished";
@@ -267,15 +277,15 @@ function stepFixed(state, inputs, dt, report) {
     advanceSimPlayer(state.players[0], inputs[0], dt);
     advanceSimPlayer(state.players[1], inputs[1], dt);
     collidePlayers(state.players[0], state.players[1]);
-    const scorer = updateBall(state.ball, dt);
+    const scorer = advanceSimBall(state.ball, dt);
     if (scorer !== null) {
         startKickoff(state, scorer);
         report.goals += 1;
         return;
     }
-    if (collidePlayerWithBall(state.ball, state.players[0]))
+    if (collideSimPlayerWithBall(state.ball, state.players[0]))
         report.kicks += 1;
-    if (collidePlayerWithBall(state.ball, state.players[1]))
+    if (collideSimPlayerWithBall(state.ball, state.players[1]))
         report.kicks += 1;
 }
 /**

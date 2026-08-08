@@ -29,6 +29,8 @@ function serializeState(state) {
         kickoffRemaining: round2(state.kickoffRemaining),
         lastScorer: state.lastScorer,
         goalCount: state.goalCount,
+        /** 시뮬레이션 시각(초, ms 정밀도). 클라이언트 스냅샷 보간의 시간축. */
+        t: Math.round(state.simTime * 1000) / 1000,
     };
 }
 function createNickname() {
