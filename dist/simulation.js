@@ -27,14 +27,17 @@ const PLAYER_WALL_BOUNCE = 0.3;
 const DASH_IMPULSE = 700;
 const DASH_TIME = 0.18;
 const DASH_COOLDOWN = 1.5;
-const BALL_DRAG = 0.85;
-const BALL_MAX_SPEED = 1800;
+// 온라인 친화 튜닝: 지연 오차는 공 속도에 비례한다(오차 = 속도 × 표시 지연).
+// 드리블(일반 킥 ~530px/s)은 그대로 두고 대포알 슛과 핀볼 난반사만 줄여
+// 양쪽 화면의 경합 판정이 일치하고 슛에 반응할 시간이 생기게 한다.
+const BALL_DRAG = 1.05;
+const BALL_MAX_SPEED = 1150;
 const BALL_BOUNCE = 0.55;
-const WALL_BOUNCE = 0.74;
+const WALL_BOUNCE = 0.62;
 const PLAYER_MASS = 5;
 const BALL_MASS = 1;
 const KICK_PUSH = 170;
-const KICK_DASH_BOOST = 1.9;
+const KICK_DASH_BOOST = 1.7;
 const KICKOFF_BALL_OFFSET = 40;
 export const createSimInput = () => ({ moveX: 0, moveY: 0, dash: false });
 export const createSimPlayer = (left) => ({
