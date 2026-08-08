@@ -17,26 +17,27 @@ export const KICKOFF_FREEZE_SECONDS = 0.9;
 export const SUB_STEP_SECONDS = 1 / 120;
 /** 한 번의 호출이 따라잡을 수 있는 최대 경기 시간. 스톨 뒤 폭주를 막는다. */
 export const MAX_CATCH_UP_SECONDS = 0.25;
-const PLAYER_ACCELERATION = 2600;
-const PLAYER_MAX_SPEED = 420;
+// 2026-08-08: 온라인 반응 여유를 위해 전 속도를 절반으로(가속도 비례 유지).
+const PLAYER_ACCELERATION = 1300;
+const PLAYER_MAX_SPEED = 210;
 const PLAYER_DASH_MAX_SPEED = PLAYER_MAX_SPEED * 2.4;
 const PLAYER_DRAG = 5.2;
 const MOVE_RESPONSE_SECONDS = 0.09;
 const PLAYER_BOUNCE = 0.42;
 const PLAYER_WALL_BOUNCE = 0.3;
-const DASH_IMPULSE = 700;
+const DASH_IMPULSE = 350;
 const DASH_TIME = 0.18;
 const DASH_COOLDOWN = 1.5;
 // 온라인 친화 튜닝: 지연 오차는 공 속도에 비례한다(오차 = 속도 × 표시 지연).
 // 드리블(일반 킥 ~530px/s)은 그대로 두고 대포알 슛과 핀볼 난반사만 줄여
 // 양쪽 화면의 경합 판정이 일치하고 슛에 반응할 시간이 생기게 한다.
 const BALL_DRAG = 1.05;
-const BALL_MAX_SPEED = 1150;
+const BALL_MAX_SPEED = 575;
 const BALL_BOUNCE = 0.55;
 const WALL_BOUNCE = 0.62;
 const PLAYER_MASS = 5;
 const BALL_MASS = 1;
-const KICK_PUSH = 170;
+const KICK_PUSH = 85;
 const KICK_DASH_BOOST = 1.7;
 const KICKOFF_BALL_OFFSET = 40;
 export const createSimInput = () => ({ moveX: 0, moveY: 0, dash: false });
