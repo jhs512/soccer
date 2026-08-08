@@ -18,6 +18,7 @@ function serializeState(state) {
             vy: round2(player.vy),
             dashCooldown: round2(player.dashCooldown),
             dashTime: round2(player.dashTime),
+            justDashTime: round2(player.justDashTime),
             face: player.face,
             moveX: round2(player.moveX),
             moveY: round2(player.moveY),

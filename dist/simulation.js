@@ -21,14 +21,21 @@ export const MAX_CATCH_UP_SECONDS = 0.25;
 // (원본 420 대비 1/6). 가속·대시는 비례 유지해 반응 곡선의 느낌은 같다.
 const PLAYER_ACCELERATION = 433;
 const PLAYER_MAX_SPEED = 70;
-const PLAYER_DASH_MAX_SPEED = PLAYER_MAX_SPEED * 2.4;
+const PLAYER_DASH_MAX_SPEED = PLAYER_MAX_SPEED * 4.8;
 const PLAYER_DRAG = 5.2;
 const MOVE_RESPONSE_SECONDS = 0.09;
 const PLAYER_BOUNCE = 0.42;
 const PLAYER_WALL_BOUNCE = 0.3;
-const DASH_IMPULSE = 117;
+// 대시 사거리 2배(2026-08-08). 저스트 대시: 게이지가 차자마자
+// JUST_DASH_WINDOW 안에 누르면 1.5배 더(원본 대비 3배) 나간다.
+const DASH_IMPULSE = 234;
 const DASH_TIME = 0.18;
 const DASH_COOLDOWN = 1.5;
+const JUST_DASH_WINDOW = 0.15;
+const JUST_DASH_MULTIPLIER = 1.5;
+const JUST_DASH_MAX_SPEED = PLAYER_MAX_SPEED * 7.2;
+/** 저스트 대시 연출 지속 시간. 클라이언트가 이 값으로 이펙트를 그린다. */
+const JUST_DASH_EFFECT_SECONDS = 0.4;
 // 온라인 친화 튜닝: 지연 오차는 공 속도에 비례한다(오차 = 속도 × 표시 지연).
 // 드리블(일반 킥 ~530px/s)은 그대로 두고 대포알 슛과 핀볼 난반사만 줄여
 // 양쪽 화면의 경합 판정이 일치하고 슛에 반응할 시간이 생기게 한다.
@@ -54,6 +61,8 @@ export const createSimPlayer = (left) => ({
     face: left ? 1 : -1,
     moveX: 0,
     moveY: 0,
+    dashReadyAge: 0,
+    justDashTime: 0,
 });
 export const createSimState = () => ({
     players: [createSimPlayer(true), createSimPlayer(false)],
@@ -98,8 +107,12 @@ export function advanceSimPlayer(player, input, dt) {
             player.face = directionX > 0 ? 1 : -1;
     }
     player.dashCooldown = Math.max(0, player.dashCooldown - dt);
+    if (player.dashCooldown <= 0)
+        player.dashReadyAge += dt;
     player.dashTime = Math.max(0, player.dashTime - dt);
+    player.justDashTime = Math.max(0, player.justDashTime - dt);
     if (input.dash && player.dashCooldown <= 0) {
+        const justDash = player.dashReadyAge <= JUST_DASH_WINDOW;
         let dashX = directionX;
         let dashY = directionY;
         if (!dashX && !dashY) {
@@ -112,15 +125,21 @@ export function advanceSimPlayer(player, input, dt) {
                 dashX = player.face;
             }
         }
-        player.vx += dashX * DASH_IMPULSE;
-        player.vy += dashY * DASH_IMPULSE;
+        const impulse = DASH_IMPULSE * (justDash ? JUST_DASH_MULTIPLIER : 1);
+        player.vx += dashX * impulse;
+        player.vy += dashY * impulse;
         player.dashCooldown = DASH_COOLDOWN;
         player.dashTime = DASH_TIME;
+        player.dashReadyAge = 0;
+        if (justDash)
+            player.justDashTime = JUST_DASH_EFFECT_SECONDS;
     }
     const drag = 1 / (1 + PLAYER_DRAG * dt);
     player.vx *= drag;
     player.vy *= drag;
-    const maximum = player.dashTime > 0 ? PLAYER_DASH_MAX_SPEED : PLAYER_MAX_SPEED;
+    const maximum = player.dashTime > 0
+        ? (player.justDashTime > 0 ? JUST_DASH_MAX_SPEED : PLAYER_DASH_MAX_SPEED)
+        : PLAYER_MAX_SPEED;
     const speed = Math.hypot(player.vx, player.vy);
     if (speed > maximum) {
         player.vx = player.vx / speed * maximum;
