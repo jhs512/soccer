@@ -1,0 +1,11 @@
+{
+  "name": "blob-soccer-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node dist/production.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.3"
+  }
+}
