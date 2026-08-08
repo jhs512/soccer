@@ -17,15 +17,16 @@ export const KICKOFF_FREEZE_SECONDS = 0.9;
 export const SUB_STEP_SECONDS = 1 / 120;
 /** 한 번의 호출이 따라잡을 수 있는 최대 경기 시간. 스톨 뒤 폭주를 막는다. */
 export const MAX_CATCH_UP_SECONDS = 0.25;
-// 2026-08-08: 온라인 반응 여유를 위해 전 속도를 절반으로(가속도 비례 유지).
-const PLAYER_ACCELERATION = 1300;
-const PLAYER_MAX_SPEED = 210;
+// 2026-08-08: 온라인 반응 여유를 위해 공은 절반, 플레이어는 추가로 1/3
+// (원본 420 대비 1/6). 가속·대시는 비례 유지해 반응 곡선의 느낌은 같다.
+const PLAYER_ACCELERATION = 433;
+const PLAYER_MAX_SPEED = 70;
 const PLAYER_DASH_MAX_SPEED = PLAYER_MAX_SPEED * 2.4;
 const PLAYER_DRAG = 5.2;
 const MOVE_RESPONSE_SECONDS = 0.09;
 const PLAYER_BOUNCE = 0.42;
 const PLAYER_WALL_BOUNCE = 0.3;
-const DASH_IMPULSE = 350;
+const DASH_IMPULSE = 117;
 const DASH_TIME = 0.18;
 const DASH_COOLDOWN = 1.5;
 // 온라인 친화 튜닝: 지연 오차는 공 속도에 비례한다(오차 = 속도 × 표시 지연).
