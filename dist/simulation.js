@@ -4,7 +4,7 @@
  * 웹 클라이언트도 이 모듈을 그대로 불러와 온라인 표시 보정의 예측에 사용한다.
  * 물리가 한 곳에만 있어야 예측과 판정이 어긋나지 않으므로 Node 전용 API는 쓰지 않는다.
  */
-export const FIELD_WIDTH = 1280;
+export const FIELD_WIDTH = 800;
 export const FIELD_HEIGHT = 800;
 export const GOAL_TOP = 275;
 export const GOAL_BOTTOM = 525;
