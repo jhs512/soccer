@@ -3,6 +3,34 @@ import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { advanceSimulation, createSimInput, createSimState, } from "./simulation.js";
 const nicknameAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const round2 = (value) => Math.round(value * 100) / 100;
+/**
+ * 60Hz로 나가는 상태를 소수 2자리로 반올림해 직렬화한다.
+ * 부동소수점 오차가 만드는 17자리 숫자를 그대로 JSON에 실으면
+ * 패킷이 몇 배로 커진다(MultiOgarII의 바이너리 프로토콜에서 얻은 교훈).
+ */
+function serializeState(state) {
+    return {
+        players: state.players.map((player) => ({
+            x: round2(player.x),
+            y: round2(player.y),
+            vx: round2(player.vx),
+            vy: round2(player.vy),
+            dashCooldown: round2(player.dashCooldown),
+            dashTime: round2(player.dashTime),
+            face: player.face,
+            moveX: round2(player.moveX),
+            moveY: round2(player.moveY),
+        })),
+        ball: { x: round2(state.ball.x), y: round2(state.ball.y), vx: round2(state.ball.vx), vy: round2(state.ball.vy) },
+        score: state.score,
+        remainingSeconds: round2(state.remainingSeconds),
+        status: state.status,
+        kickoffRemaining: round2(state.kickoffRemaining),
+        lastScorer: state.lastScorer,
+        goalCount: state.goalCount,
+    };
+}
 function createNickname() {
     const bytes = randomBytes(4);
     return `Blob-${Array.from(bytes, (value) => nicknameAlphabet[value % nicknameAlphabet.length]).join("")}`;
@@ -24,6 +52,8 @@ export function createGameServer(validTokens = new Set(), options = {}) {
         liveMatches: 0,
         completedMatches: 0,
         totalForfeits: 0,
+        /** 세션 틱 1회 처리 시간 EMA(ms). 서버 과부하 조기 신호로 admin에 노출한다. */
+        avgTickMs: 0,
     };
     let publicMatchSequence = 0;
     let guestSequence = 0;
@@ -147,7 +177,7 @@ export function createGameServer(validTokens = new Set(), options = {}) {
                 sessionId,
                 playerIndex: index,
                 opponent: { nickname: socketNames.get(sockets[index === 0 ? 1 : 0].id) ?? "Guest" },
-                state,
+                state: serializeState(state),
             });
         }
         session.interval = setInterval(() => {
@@ -159,6 +189,7 @@ export function createGameServer(validTokens = new Set(), options = {}) {
             if (session.frozen)
                 return;
             const report = advanceSimulation(session.state, session.inputs, elapsedSeconds, session.accumulator);
+            stats.avgTickMs = round2(stats.avgTickMs + (performance.now() - now - stats.avgTickMs) * 0.05);
             session.accumulator = report.accumulator;
             session.tickCount += 1;
             const scored = report.goals > 0;
@@ -171,7 +202,7 @@ export function createGameServer(validTokens = new Set(), options = {}) {
             }
             // 득점·종료 틱은 배수와 무관하게 즉시 내보내 클라이언트가 연출을 놓치지 않게 한다.
             if (session.tickCount % broadcastEveryTicks === 0 || scored || session.state.status === "finished") {
-                io.to(sessionId).emit("state", session.state);
+                io.to(sessionId).emit("state", serializeState(session.state));
             }
             if (session.state.status === "finished") {
                 clearInterval(session.interval);
