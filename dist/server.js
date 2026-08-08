@@ -65,6 +65,35 @@ export function createGameServer(validTokens = new Set(), options = {}) {
     const pendingMatches = new Map();
     const onlineSessions = new Map();
     const socketSessionIds = new Map();
+    /** 마지막 실제 조작(이동·대시·이모지) 시각. 방치된 탭을 매칭에서 걸러낸다. */
+    const socketActivityAt = new Map();
+    const socketEmoteAt = new Map();
+    const QUEUE_AFK_MS = options.queueAfkMs ?? 90_000;
+    const EMOTES = ["👍", "😄", "😢", "🔥"];
+    const roomAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    /** 로비 방: 코드 → 호스트·게스트 소켓. 게스트가 들어오면 두 명이 고정된다. */
+    const rooms = new Map();
+    const socketRoomCodes = new Map();
+    const leaveRoom = (socketId) => {
+        const code = socketRoomCodes.get(socketId);
+        if (!code)
+            return;
+        socketRoomCodes.delete(socketId);
+        const room = rooms.get(code);
+        if (!room)
+            return;
+        if (room.hostId === socketId) {
+            rooms.delete(code);
+            if (room.guestId) {
+                socketRoomCodes.delete(room.guestId);
+                io.sockets.sockets.get(room.guestId)?.emit("room-closed", { reason: "host-left" });
+            }
+        }
+        else if (room.guestId === socketId) {
+            room.guestId = null;
+            io.sockets.sockets.get(room.hostId)?.emit("room-peer-left", {});
+        }
+    };
     const snapshot = () => ({
         updatedAt: new Date().toISOString(),
         stats: { ...stats },
@@ -244,6 +273,14 @@ export function createGameServer(validTokens = new Set(), options = {}) {
         io.to(session.id).emit("result", { score: session.state.score, result: "몰수 종료" });
     };
     const tryMatchQueue = () => {
+        // 방치된 탭(마지막 조작이 오래된 소켓)은 매칭에서 제외한다.
+        for (let index = queuedSockets.length - 1; index >= 0; index -= 1) {
+            const id = queuedSockets[index];
+            if (Date.now() - (socketActivityAt.get(id) ?? 0) <= QUEUE_AFK_MS)
+                continue;
+            queuedSockets.splice(index, 1);
+            io.sockets.sockets.get(id)?.emit("queue-status", { state: "idle", reason: "afk" });
+        }
         while (queuedSockets.length >= 2) {
             const first = queuedSockets.shift();
             const second = queuedSockets.shift();
@@ -263,12 +300,14 @@ export function createGameServer(validTokens = new Set(), options = {}) {
     io.on("connection", (socket) => {
         const token = String(socket.handshake.auth.token);
         socketNames.set(socket.id, profileNames.get(token) ?? `Guest-${String(++guestSequence).padStart(3, "0")}`);
+        socketActivityAt.set(socket.id, Date.now());
         stats.activeConnections += 1;
         stats.totalConnections += 1;
         broadcastSnapshot();
         socket.on("join-queue", () => {
             if (queuedSockets.includes(socket.id) || socketSessionIds.has(socket.id) || [...pendingMatches.values()].some((pending) => pending.socketIds.includes(socket.id)))
                 return;
+            socketActivityAt.set(socket.id, Date.now());
             queuedSockets.push(socket.id);
             socket.emit("queue-status", { state: "searching" });
             tryMatchQueue();
@@ -293,6 +332,8 @@ export function createGameServer(validTokens = new Set(), options = {}) {
                 return;
             if (!Number.isFinite(input.moveX) || !Number.isFinite(input.moveY) || Math.abs(input.moveX) > 1 || Math.abs(input.moveY) > 1)
                 return;
+            if (input.moveX || input.moveY || input.dash)
+                socketActivityAt.set(socket.id, Date.now());
             stats.totalInputs += 1;
             broadcastSnapshot();
             const onlineSession = onlineSessions.get(socketSessionIds.get(socket.id) ?? "");
@@ -306,6 +347,91 @@ export function createGameServer(validTokens = new Set(), options = {}) {
                 return;
             }
             io.to([...socket.rooms].find((r) => r !== socket.id) ?? socket.id).emit("state", { input });
+        });
+        socket.on("emote", (index) => {
+            if (typeof index !== "number" || !EMOTES[index])
+                return;
+            const now = Date.now();
+            // 이모지 도배 방지: 소켓당 600ms 속도 제한.
+            if (now - (socketEmoteAt.get(socket.id) ?? 0) < 600)
+                return;
+            socketEmoteAt.set(socket.id, now);
+            socketActivityAt.set(socket.id, now);
+            const session = onlineSessions.get(socketSessionIds.get(socket.id) ?? "");
+            if (!session)
+                return;
+            const playerIndex = session.socketIds.indexOf(socket.id);
+            if (playerIndex < 0)
+                return;
+            io.to(session.id).emit("emote", { playerIndex, emoji: EMOTES[index] });
+        });
+        // 로비: 방 코드를 만들거나 참가해 특정 상대와 경기한다.
+        socket.on("create-room", () => {
+            if (socketRoomCodes.has(socket.id) || socketSessionIds.has(socket.id))
+                return;
+            let code = "";
+            do {
+                code = Array.from(randomBytes(4), (value) => roomAlphabet[value % roomAlphabet.length]).join("");
+            } while (rooms.has(code));
+            rooms.set(code, { hostId: socket.id, guestId: null });
+            socketRoomCodes.set(socket.id, code);
+            socketActivityAt.set(socket.id, Date.now());
+            socket.emit("room-created", { code });
+        });
+        socket.on("join-room", (rawCode) => {
+            if (typeof rawCode !== "string" || socketSessionIds.has(socket.id))
+                return;
+            const code = rawCode.trim().toUpperCase();
+            const room = rooms.get(code);
+            if (!room || room.hostId === socket.id)
+                return;
+            if (room.guestId && room.guestId !== socket.id) {
+                socket.emit("room-error", { reason: "full" });
+                return;
+            }
+            room.guestId = socket.id;
+            socketRoomCodes.set(socket.id, code);
+            socketActivityAt.set(socket.id, Date.now());
+            const payload = {
+                code,
+                players: [socketNames.get(room.hostId) ?? "Guest", socketNames.get(socket.id) ?? "Guest"],
+            };
+            io.sockets.sockets.get(room.hostId)?.emit("room-ready", { ...payload, playerIndex: 0 });
+            socket.emit("room-ready", { ...payload, playerIndex: 1 });
+        });
+        socket.on("leave-room", () => leaveRoom(socket.id));
+        // 같은 네트워크 P2P를 위한 WebRTC 시그널 중계. 서버는 내용을 보지 않고 상대에게만 전달한다.
+        socket.on("rtc-signal", (payload) => {
+            const code = socketRoomCodes.get(socket.id);
+            const room = code ? rooms.get(code) : undefined;
+            if (!room)
+                return;
+            const peerId = room.hostId === socket.id ? room.guestId : room.hostId;
+            if (peerId)
+                io.sockets.sockets.get(peerId)?.emit("rtc-signal", payload);
+        });
+        // 방에서 서버 권위 경기 시작(P2P가 안 되거나 원하지 않을 때의 기본 경로).
+        socket.on("start-room-match", () => {
+            const code = socketRoomCodes.get(socket.id);
+            const room = code ? rooms.get(code) : undefined;
+            if (!room || !room.guestId || room.hostId !== socket.id)
+                return;
+            const matchId = `room-${code}-${randomBytes(4).toString("base64url")}`;
+            pendingMatches.set(matchId, { socketIds: [room.hostId, room.guestId], timer: setTimeout(() => beginOnlineSession(matchId), 0) });
+        });
+        // P2P 락스텝 경기: 서버는 판정하지 않고 공개 기록만 등록한다.
+        socket.on("start-room-p2p", () => {
+            const code = socketRoomCodes.get(socket.id);
+            const room = code ? rooms.get(code) : undefined;
+            if (!room || !room.guestId || room.hostId !== socket.id)
+                return;
+            const sessionId = `p2p-${code}-${randomBytes(4).toString("base64url")}`;
+            for (const id of [room.hostId, room.guestId]) {
+                io.sockets.sockets.get(id)?.join(sessionId);
+            }
+            sessions.set(sessionId, new Set([room.hostId, room.guestId]));
+            registerPublicMatch(sessionId, [room.hostId, room.guestId]);
+            io.to(sessionId).emit("p2p-match", { sessionId });
         });
         socket.on("result", (result) => {
             const sessionId = [...socket.rooms].find((room) => room !== socket.id);
@@ -346,6 +472,9 @@ export function createGameServer(validTokens = new Set(), options = {}) {
             io.to(sessionId ?? socket.id).emit("forfeit", { winnerSocketId: socket.id });
         });
         socket.on("disconnect", () => {
+            leaveRoom(socket.id);
+            socketActivityAt.delete(socket.id);
+            socketEmoteAt.delete(socket.id);
             const queueIndex = queuedSockets.indexOf(socket.id);
             if (queueIndex >= 0)
                 queuedSockets.splice(queueIndex, 1);
