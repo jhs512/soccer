@@ -1,6 +1,6 @@
 import { Server } from "socket.io";
 import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { advanceSimulation, createSimInput, createSimState, } from "./simulation.js";
 const nicknameAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const round2 = (value) => Math.round(value * 100) / 100;
@@ -78,10 +78,21 @@ export function createGameServer(validTokens = new Set(), options = {}) {
     const socketPublicIps = new Map();
     const socketPeerIds = new Map();
     const peerIdSockets = new Map();
-    /** 참가자를 기다리는 공개 방 목록(코드·호스트 닉네임만 노출). */
+    /**
+     * 네트워크 그룹 ID: 같은 공인 IP면 같은 값. IP 자체는 노출하지 않도록
+     * 서버 실행마다 바뀌는 솔트로 해시한다. 클라이언트는 이 값으로
+     * P2P 로비(같은 네트워크 방)와 일반 로비를 구분한다.
+     */
+    const netIdSalt = randomBytes(16).toString("base64url");
+    const netIdOf = (ip) => ip ? createHash("sha1").update(netIdSalt + ip).digest("base64url").slice(0, 10) : "";
+    /** 참가자를 기다리는 공개 방 목록(코드·호스트 닉네임·네트워크 그룹만 노출). */
     const roomListPayload = () => [...rooms.entries()]
         .filter(([, room]) => !room.guestId)
-        .map(([code, room]) => ({ code, host: socketNames.get(room.hostId) ?? "Guest" }));
+        .map(([code, room]) => ({
+        code,
+        host: socketNames.get(room.hostId) ?? "Guest",
+        netId: netIdOf(socketPublicIps.get(room.hostId)),
+    }));
     const broadcastRoomList = () => io.emit("room-list", roomListPayload());
     /** 같은 공인 IP(= 같은 네트워크로 추정)의 다른 접속자 목록을 각자에게 보낸다. */
     const broadcastLanPeers = (ip) => {
@@ -331,6 +342,7 @@ export function createGameServer(validTokens = new Set(), options = {}) {
         const peerId = randomBytes(6).toString("base64url");
         socketPeerIds.set(socket.id, peerId);
         peerIdSockets.set(peerId, socket.id);
+        socket.emit("net-id", { netId: netIdOf(publicIp) });
         socket.emit("room-list", roomListPayload());
         broadcastLanPeers(publicIp);
         stats.activeConnections += 1;
