@@ -23,10 +23,28 @@ import { PracticeBot } from "./bot.js";
 /** 경기 중 월드에 "AI 연습 중"으로 보이게 하고, 관전자에게 화면을 중계하는 주기. */
 const SPECTATOR_INTERVAL_MS = 100;
 
+export type PracticeResult = { score: [number, number]; won: boolean };
+
+/**
+ * 끝났으면 결과, 아니면 null.
+ *
+ * `advanceSimulation`은 `status === "finished"`가 되면 **첫 줄에서 그대로 반환**한다. 즉 승부가
+ * 갈리는 순간 시뮬레이션이 멈춘다. 화면이 이걸 감지하지 못하면 정지한 경기장만 남아
+ * 게임이 끊긴 것처럼 보인다 — 실제로 그 버그가 있었다.
+ *
+ * 연습에서 나는 언제나 왼쪽(0번)이다.
+ */
+export function practiceResultOf(state: SimState): PracticeResult | null {
+  if (state.status !== "finished") return null;
+  return { score: [state.score[0], state.score[1]], won: state.score[0] > state.score[1] };
+}
+
 export type PracticeHandle = {
   active: boolean;
   state: React.RefObject<SimState | null>;
   input: React.RefObject<MatchInput>;
+  /** 3점 선승이 갈리면 채워진다. 채워진 뒤에는 시뮬레이션이 더 진행되지 않는다. */
+  result: PracticeResult | null;
   start: () => void;
   stop: () => void;
 };
@@ -47,6 +65,7 @@ function toSnapshot(state: SimState): MatchSnapshot {
 
 export function usePractice(socket: BackendSocket | null): PracticeHandle {
   const [active, setActive] = useState(false);
+  const [result, setResult] = useState<PracticeResult | null>(null);
   const state = useRef<SimState | null>(null);
   const input = useRef<MatchInput>({ moveX: 0, moveY: 0, dash: false, fire: false });
   const bot = useRef(new PracticeBot()).current;
@@ -55,11 +74,13 @@ export function usePractice(socket: BackendSocket | null): PracticeHandle {
     state.current = createSimState();
     bot.reset();
     input.current = { moveX: 0, moveY: 0, dash: false, fire: false };
+    setResult(null);
     setActive(true);
   }, [bot]);
 
   const stop = useCallback(() => {
     state.current = null;
+    setResult(null);
     setActive(false);
   }, []);
 
@@ -68,6 +89,7 @@ export function usePractice(socket: BackendSocket | null): PracticeHandle {
     let frame = 0;
     let previous = performance.now();
     let accumulator = 0;
+    let reported = false;
 
     const loop = (now: number) => {
       frame = requestAnimationFrame(loop);
@@ -84,6 +106,13 @@ export function usePractice(socket: BackendSocket | null): PracticeHandle {
       // 대시·발사는 눌린 순간 한 번만 소비한다.
       input.current.dash = false;
       input.current.fire = false;
+
+      // 한 번만 올린다 — 매 프레임 setState를 부르면 리렌더가 쌓인다.
+      const finished = practiceResultOf(current);
+      if (finished && !reported) {
+        reported = true;
+        setResult(finished);
+      }
     };
 
     frame = requestAnimationFrame(loop);
@@ -108,7 +137,7 @@ export function usePractice(socket: BackendSocket | null): PracticeHandle {
     };
   }, [socket, active]);
 
-  return { active, state, input, start, stop };
+  return { active, state, input, result, start, stop };
 }
 
 export const createIdleInput = createSimInput;

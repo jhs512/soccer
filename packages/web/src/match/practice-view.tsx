@@ -84,6 +84,27 @@ export function PracticeView({
           </span>
         </div>
         <canvas ref={canvas} width={MATCH_CANVAS_SIZE} height={MATCH_CANVAS_SIZE} />
+
+        {/*
+          승부가 갈리면 시뮬레이션이 멈춘다. 이 패널이 없으면 정지한 경기장만 남아
+          게임이 끊긴 것처럼 보인다.
+        */}
+        {practice.result && (
+          <div className="panel result-panel">
+            <small>{practice.result.won ? "승리" : "패배"}</small>
+            <span>
+              {practice.result.score[0]} : {practice.result.score[1]}
+            </span>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button type="button" onClick={practice.start}>
+                다시하기
+              </button>
+              <button type="button" onClick={onLeave}>
+                로비로 나가기
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {queueLabel && <div className="random-match-tooltip">{queueLabel}</div>}
