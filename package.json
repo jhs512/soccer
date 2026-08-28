@@ -1,0 +1,21 @@
+{
+  "name": "blob-soccer-online",
+  "private": true,
+  "packageManager": "pnpm@11.4.0",
+  "scripts": {
+    "build": "pnpm --filter @blob-soccer/server build",
+    "start": "pnpm --filter @blob-soccer/server start",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.3",
+    "jsdom": "^30.0.1",
+    "socket.io-client": "^4.8.1",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1"
+  }
+}

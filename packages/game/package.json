@@ -1,0 +1,8 @@
+{
+  "name": "@blob-soccer/game",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  }
+}

@@ -1,0 +1,81 @@
+/*
+ * `live.css`(배포 산출물 전문) 위에 얹는 의도된 변경.
+ *
+ * live.css는 미니파이된 원본이라 직접 고치지 않는다. 여기서 덮어써야 무엇을 바꿨는지가 남는다.
+ */
+
+/* 2026-08-25: 월드 아바타를 1/3로 축소. 경기장 선수(PLAYER_RADIUS 28 → 9.33)와 보조를 맞춘다. */
+.world-cell-wrap {
+  width: clamp(16px, 2vw, 23px);
+  height: clamp(16px, 2vw, 23px);
+}
+
+.world-avatar {
+  min-width: 74px;
+}
+
+.world-avatar b {
+  max-width: 92px;
+  margin-top: 4px;
+  font-size: 10px;
+}
+
+.world-avatar small {
+  font-size: 8px;
+}
+
+/*
+ * 대시 연출의 크기를 **몸 기준**으로 다시 잡는다.
+ *
+ * 원본 `.dash-fx`는 아바타 박스(이름표까지 포함한 74px)에 걸려 있었다. 아바타를 1/3로 줄이자
+ * 몸 대비 오라가 과하게 커졌고, 상자가 정사각형이 아니어서 파동이 타원으로 그려졌다.
+ * 몸(`.world-cell-wrap`)을 기준으로 정사각형 상자를 만들어 경기 화면 캔버스와 같은 비율로 맞춘다.
+ * 비율은 `src/effects/dash.ts`의 AURA_RADIUS_RATIO(4) 등과 짝을 이룬다 — 한쪽만 고치면 갈라진다.
+ */
+.world-cell-wrap .dash-fx {
+  inset: auto;
+  left: 50%;
+  top: 50%;
+  /* 몸 지름의 4배 = 반지름의 8배 상자. 파동 기본 반지름이 몸 반지름 × 4가 된다. */
+  width: 400%;
+  height: 400%;
+  transform: translate(-50%, -50%);
+}
+
+/* 잔상은 몸과 같은 크기여야 한다. 400% 상자 안에서 25%가 몸 지름이다. */
+.world-cell-wrap .dash-ghost {
+  inset: 37.5%;
+}
+
+/*
+ * 속도선 영역: 몸 반지름 대비 가로 6 · 세로 4 (캔버스의 SPEED_FIELD_*_RATIO와 동일).
+ *
+ * 퍼센트의 기준은 몸이 아니라 부모인 `.dash-fx`(몸 지름의 4배)다. 몸 반지름 6배 = 몸 지름 3배이고
+ * `.dash-fx`가 몸 지름 4배이므로 75%, 세로는 몸 지름 2배이므로 50%다.
+ */
+.world-cell-wrap .dash-speed-field {
+  width: 75%;
+  height: 50%;
+}
+
+/*
+ * 속도선의 이동 거리를 비율로 바꾼다.
+ *
+ * 원본 `world-speed-line` 키프레임은 `translate: -34px → 12px` 로 **고정 픽셀**이다.
+ * 아바타를 1/3로 줄이자 그 34px이 몸의 3배가 넘어 선이 화면 밖까지 뻗었다.
+ * 퍼센트는 요소 자기 너비 기준이라 몸 크기를 따라 함께 줄어든다.
+ * 값은 캔버스 쪽 SPEED_FIELD_WIDTH_RATIO 계산과 맞춘 것이다.
+ */
+@keyframes world-speed-line {
+  0% {
+    opacity: 0;
+    translate: -55%;
+  }
+  35% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    translate: 20%;
+  }
+}
