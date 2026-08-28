@@ -85,9 +85,10 @@ export const LUNGE_SQUASH = 0.9;
 export function applyDashBody(
   context: CanvasRenderingContext2D,
   player: { x: number; y: number; vx: number; vy: number; dashTime: number },
+  dashing = player.dashTime > 0,
 ) {
   context.save();
-  if (player.dashTime <= 0) return;
+  if (!dashing) return;
   const speed = Math.hypot(player.vx, player.vy);
   if (speed < 1) return;
 

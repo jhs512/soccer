@@ -109,6 +109,7 @@ function drawPlayer(
   player: { x: number; y: number; vx: number; vy: number; dashTime: number; moveX: number; moveY: number; abilityGauge: number },
   index: 0 | 1,
   name: string,
+  dashing: boolean,
 ) {
   const color = PLAYER_COLORS[index];
 
@@ -120,8 +121,8 @@ function drawPlayer(
   context.stroke();
 
   // 대시 중이면 몸이 발광하고 진행 방향으로 늘어난다(월드 `.world-cell`의 CSS와 같은 처리).
-  applyDashBody(context, player);
-  if (player.dashTime <= 0) {
+  applyDashBody(context, player, dashing);
+  if (!dashing) {
     context.shadowColor = color;
     context.shadowBlur = 16;
   }
@@ -187,8 +188,12 @@ export function renderMatch(
     const side = index as 0 | 1;
     const drawn = selfOverride && selfOverride.index === side ? { ...player, ...selfOverride } : player;
     const body = { ...player, ...drawn };
-    drawDashEffect(context, body, PLAYER_RADIUS, side === selfIndex, nowSeconds);
-    drawPlayer(context, body, side, names[side]);
+    // 경기가 끝나면 시뮬레이션이 멈추는데 dashTime은 0이 아닌 채로 얼어붙는다. 파동은 시간
+    // 기반이라 그대로 두면 정지 화면 위에서 혼자 계속 뛴다.
+    if (snapshot.status !== "finished") {
+      drawDashEffect(context, body, PLAYER_RADIUS, side === selfIndex, nowSeconds);
+    }
+    drawPlayer(context, body, side, names[side], snapshot.status !== "finished" && body.dashTime > 0);
   });
 
   effects.draw(context, nowSeconds);
