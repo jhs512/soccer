@@ -51,6 +51,29 @@ describe("AI 연습 종료 배선", () => {
     expect(panel!.textContent).toContain("다시하기");
   });
 
+  it("시뮬레이션이 스스로 승부를 낼 때도 패널이 뜬다", async () => {
+    // 앞 테스트는 status를 밖에서 강제한다. 실제로는 루프 안의 advanceSimulation이 끝을 낸다 —
+    // 그 경로로도 결과가 화면까지 도달하는지 확인한다.
+    handle = null;
+    const screen = render(<Harness onReady={() => {}} />);
+    await act(async () => void handle!.start());
+    await frames();
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const state = handle!.state.current;
+      if (!state || state.status === "finished") break;
+      // 봇 골문 반대쪽(왼쪽)으로 공을 밀어 넣어 봇이 득점하게 한다.
+      state.kickoffRemaining = 0;
+      state.ball = { x: 18, y: 400, vx: -900, vy: 0 };
+      await frames();
+    }
+
+    expect(handle!.state.current!.status).toBe("finished");
+    const panel = screen.container.querySelector(".result-panel");
+    expect(panel).not.toBeNull();
+    expect(panel!.textContent).toContain("패배");
+  });
+
   it("다시하기를 누르면 패널이 사라지고 0:0으로 새 경기가 시작된다", async () => {
     handle = null;
     const screen = render(<Harness onReady={() => {}} />);
