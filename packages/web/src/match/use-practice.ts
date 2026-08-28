@@ -89,7 +89,15 @@ export function usePractice(socket: BackendSocket | null): PracticeHandle {
     let frame = 0;
     let previous = performance.now();
     let accumulator = 0;
-    let reported = false;
+    /**
+     * 결과를 이미 올린 경기.
+     *
+     * 불리언 플래그로 두면 안 된다 — `다시하기`는 active가 이미 true인 채로 start()를 부르므로
+     * 이 이펙트가 재실행되지 않고, 플래그가 이전 경기의 true로 남아 두 번째 경기부터는
+     * 종료가 영영 보고되지 않는다(정지 화면만 남는다). start()가 새 SimState를 만들어 주므로
+     * 상태 객체 자체를 기준으로 삼으면 초기화가 필요 없다.
+     */
+    let reportedFor: SimState | null = null;
 
     const loop = (now: number) => {
       frame = requestAnimationFrame(loop);
@@ -107,10 +115,10 @@ export function usePractice(socket: BackendSocket | null): PracticeHandle {
       input.current.dash = false;
       input.current.fire = false;
 
-      // 한 번만 올린다 — 매 프레임 setState를 부르면 리렌더가 쌓인다.
+      // 경기당 한 번만 올린다 — 매 프레임 setState를 부르면 리렌더가 쌓인다.
       const finished = practiceResultOf(current);
-      if (finished && !reported) {
-        reported = true;
+      if (finished && reportedFor !== current) {
+        reportedFor = current;
         setResult(finished);
       }
     };

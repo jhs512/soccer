@@ -74,6 +74,37 @@ describe("AI 연습 종료 배선", () => {
     expect(panel!.textContent).toContain("패배");
   });
 
+  it("다시하기로 시작한 두 번째 경기가 끝나도 패널이 다시 뜬다", async () => {
+    // `다시하기`는 active가 이미 true인 채로 start()를 부르므로 루프 이펙트가 재실행되지 않는다.
+    // 종료 보고를 불리언 플래그로 두면 이전 경기의 true가 남아 두 번째 경기부터 영영 안 뜬다.
+    handle = null;
+    const screen = render(<Harness onReady={() => {}} />);
+    await act(async () => void handle!.start());
+    await frames();
+
+    const finishByOwnGoal = async () => {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const state = handle!.state.current;
+        if (!state || state.status === "finished") break;
+        state.kickoffRemaining = 0;
+        state.ball = { x: 18, y: 400, vx: -900, vy: 0 };
+        await frames();
+      }
+    };
+
+    await finishByOwnGoal();
+    expect(screen.container.querySelector(".result-panel")).not.toBeNull();
+
+    // 다시하기 → 두 번째 경기.
+    await act(async () => void handle!.start());
+    await frames();
+    expect(screen.container.querySelector(".result-panel")).toBeNull();
+
+    await finishByOwnGoal();
+    expect(handle!.state.current!.status).toBe("finished");
+    expect(screen.container.querySelector(".result-panel")).not.toBeNull();
+  });
+
   it("다시하기를 누르면 패널이 사라지고 0:0으로 새 경기가 시작된다", async () => {
     handle = null;
     const screen = render(<Harness onReady={() => {}} />);
